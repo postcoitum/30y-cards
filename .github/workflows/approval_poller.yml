@@ -51,6 +51,10 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           BUFFER_ACCESS_TOKEN: ${{ secrets.BUFFER_ACCESS_TOKEN }}
+          # 연습 스위치. 레포 변수(Settings > Variables)에 true를 넣어두면 ✅를 눌러도
+          # 예약하지 않고 Buffer 초안으로만 저장한다 - 인스타에 올라가지 않는다.
+          # 변수가 없으면 빈 문자열이라 config가 false로 읽는다(= 실제 예약).
+          BUFFER_SAVE_TO_DRAFT: ${{ vars.BUFFER_SAVE_TO_DRAFT }}
         run: |
           python approval_bot.py poll
           python approval_bot.py remind

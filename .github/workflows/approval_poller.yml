@@ -27,6 +27,9 @@ concurrency:
 jobs:
   watch:
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: write
     steps:
       - name: 파이프라인 코드 체크아웃 (private 30y)
         uses: actions/checkout@v4

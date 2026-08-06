@@ -98,6 +98,19 @@ jobs:
             echo "needs_revision=true" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: 발행 예약 유실 감시
+        # 웹훅(repository_dispatch) 경로에서는 돌리지 않는다 - 사람이 버튼 반응을
+        # 기다리는 빠른 경로에 감시 지연을 얹지 않기 위해서다. cron/workflow_dispatch
+        # 주기 실행에서만 "오늘 daily_30y_news.yml 이 한 번이라도 돌았는지" 확인하고,
+        # 17시(KST)가 지나도록 없으면 대신 dispatch 한다 (publish_watchdog.py).
+        if: github.event_name != 'repository_dispatch'
+        env:
+          GH_DISPATCH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python publish_watchdog.py
+
       # ---- 여기부터는 수정 요청이 들어왔을 때만 돈다 ----
 
       - name: Claude가 문구를 고친다

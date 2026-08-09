@@ -83,6 +83,9 @@ jobs:
           # 예약하지 않고 Buffer 초안으로만 저장한다 - 인스타에 올라가지 않는다.
           # 변수가 없으면 빈 문자열이라 config가 false로 읽는다(= 실제 예약).
           BUFFER_SAVE_TO_DRAFT: ${{ vars.BUFFER_SAVE_TO_DRAFT }}
+          # 발행 예약 유실 감시(publish_watchdog.py)가 대리 발행을 요청할 때 쓰는 토큰.
+          # 체크아웃에 쓰는 것과 같은 시크릿을 재사용한다 - 별도 등록 불필요.
+          GH_DISPATCH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
         run: |
           if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
             # 웹훅으로 승인/수정 지시가 왔다. 이 경로에서는 remind를 돌리지 않는다 -
@@ -92,28 +95,20 @@ jobs:
             # 주기 실행. 게시 감지가 본업이고, poll은 웹훅을 떼고 롤백했을 때만 일한다.
             python approval_bot.py poll
             python approval_bot.py remind
+            # 발행 예약이 아예 유실됐는지(8/4 사고) 확인하고 필요하면 대신 깨운다.
+            # 웹훅 분기(hook)에는 넣지 않는다 - 버튼 클릭과는 무관한 별개의 점검이다.
+            # 실패해도 본업(승인 처리)을 죽이지 않도록 run() 내부에서 항상 0을 반환한다.
+            python publish_watchdog.py
           fi
           if ls pending/*.json >/dev/null 2>&1 && \
              grep -l '"status": "revision_requested"' pending/*.json >/dev/null 2>&1; then
             echo "needs_revision=true" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: 발행 예약 유실 감시
-        # 웹훅(repository_dispatch) 경로에서는 돌리지 않는다 - 사람이 버튼 반응을
-        # 기다리는 빠른 경로에 감시 지연을 얹지 않기 위해서다. cron/workflow_dispatch
-        # 주기 실행에서만 "오늘 daily_30y_news.yml 이 한 번이라도 돌았는지" 확인하고,
-        # 17시(KST)가 지나도록 없으면 대신 dispatch 한다 (publish_watchdog.py).
-        if: github.event_name != 'repository_dispatch'
-        env:
-          GH_DISPATCH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python publish_watchdog.py
-
       # ---- 여기부터는 수정 요청이 들어왔을 때만 돈다 ----
 
       - name: Claude가 문구를 고친다
+        id: claude_edit
         if: steps.poll.outputs.needs_revision == 'true'
         uses: anthropics/claude-code-action@v1
         with:
@@ -140,6 +135,14 @@ jobs:
 
             JSON 파일만 수정하고 다른 파일은 건드리지 마라. 커밋하지 마라.
 
+      - name: 수정 실패 알림 및 상태 전환
+        if: failure() && steps.poll.outputs.needs_revision == 'true' && steps.claude_edit.outcome == 'failure'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python approval_bot.py revision_failed
+
       - name: 수정본 렌더링 준비
         if: steps.poll.outputs.needs_revision == 'true'
         run: |
@@ -157,9 +160,26 @@ jobs:
 
       - name: 대기열 변경 커밋
         if: always()
+        env:
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # claude-code-action이 여기 오는 동안 git 인증정보(remote/extraheader)를 자기
+          # GitHub App 설치 토큰으로 덮어쓰고 종료 시 revoke한다. 그대로 두면 push가
+          # "Invalid username or token"으로 조용히 실패한다(2026-08-08 사고, 재현율 100%).
+          # 매 실행마다 우리 토큰으로 되돌려놓고 push한다.
+          git config --unset-all http.https://github.com/.extraheader || true
+          git remote set-url origin "https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/postcoitum/30y.git"
           git add pending/ || true
           git diff --staged --quiet || git commit -m "pending: 승인 처리 결과 반영"
-          git push || echo "push 실패 - 다음 실행에서 다시 시도합니다"
+          if ! git push; then
+            echo "::error::push 실패 - 승인/수정 처리 결과가 GitHub에 반영되지 않았습니다"
+            curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+              -d chat_id="${TELEGRAM_CHAT_ID}" \
+              -d text="⚠️ 승인/수정 처리 결과를 GitHub에 반영하지 못했습니다(git push 실패). 방금 누른 버튼이나 보낸 수정 지시가 적용되지 않았을 수 있습니다 - 다시 시도해주세요." \
+              || true
+            exit 1
+          fi

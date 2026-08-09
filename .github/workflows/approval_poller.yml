@@ -143,11 +143,22 @@ jobs:
         run: |
           python approval_bot.py revision_failed
 
+      # 발행 워크플로(daily_30y_news.yml)에 ffmpeg 보장 스텝이 따로 있다는 것은
+      # 러너에 ffmpeg이 있다고 믿을 수 없다는 뜻이다. 수정 경로는 cmd_resend()에서
+      # 릴스를 새 커버로 재생성하는데, 그 실패는 try/except에 삼켜져 reel_video_url이
+      # None이 된다 - 즉 ffmpeg이 없으면 "✏️ 수정하면 릴스가 조용히 사라지는" 버그가
+      # 되고, 캐러셀은 정상 재전송되므로 아무도 눈치채지 못한다. 발행 워크플로와
+      # 같은 보장을 여기에도 둔다.
       - name: 수정본 렌더링 준비
         if: steps.poll.outputs.needs_revision == 'true'
         run: |
           pip install -r requirements.txt
           python -m playwright install chromium --with-deps
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            echo "ffmpeg 미설치 - apt로 설치합니다 (릴스 재생성용)"
+            sudo apt-get update && sudo apt-get install -y ffmpeg
+          fi
+          ffmpeg -version | head -1
 
       - name: 수정본 재전송
         if: steps.poll.outputs.needs_revision == 'true'

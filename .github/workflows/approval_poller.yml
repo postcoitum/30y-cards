@@ -160,6 +160,9 @@ jobs:
 
       - name: 대기열 변경 커밋
         if: always()
+        # 2026-08-09: 이 스텝의 git push 인증 복구 패치가 실제로 라이브에서 동작하는지
+        # sync_cards_repo.yml을 통한 실전 배포로 재검증했다 (CARDS_REPO_TOKEN에
+        # workflow 스코프를 추가한 뒤 - 스코프 없이는 이 파일 자체의 배포도 막힌다).
         env:
           PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}

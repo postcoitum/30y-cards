@@ -166,6 +166,9 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           CARDS_REPO_TOKEN: ${{ secrets.CARDS_REPO_TOKEN }}
+          # 이 스텝이 renderer.py로 수정본을 다시 렌더링한다. .env는 이 러너에 없으므로
+          # 발행 워크플로와 같은 방식으로 레포 변수를 읽는다 (기본값 v1 유지).
+          KOREAN_LINEBREAK_ENGINE: ${{ vars.KOREAN_LINEBREAK_ENGINE || 'v1' }}
         run: |
           python approval_bot.py resend
 

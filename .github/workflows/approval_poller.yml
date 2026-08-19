@@ -42,6 +42,18 @@ concurrency:
 jobs:
   watch:
     runs-on: ubuntu-latest
+    # 2026-08-19 사고(발행 워크플로의 설치 단계가 5시간 넘게 멈춤)와 같은 유형이 여기서는
+    # 더 나쁘다. 위 concurrency가 cancel-in-progress: false라 **멈춘 실행 하나가 뒤따르는
+    # 모든 승인·게시 감지를 큐에 세워 영구 정지**시키기 때문이다. GitHub 기본 상한 6시간에
+    # 맡기면 그동안 버튼이 아예 안 먹는다.
+    #
+    # 30분인 이유: 평상시 경로(체크아웃 2회 + `pip install requests` + 승인 처리 + 커밋)는
+    # 3~5분이고, 게시까지 가도 컨테이너 대기가 캐러셀 60초·릴스 180초로 상한이 있다.
+    # 가장 무거운 건 수정 요청 경로다 - `requirements.txt` 전체 설치와
+    # `playwright install chromium --with-deps`(합쳐 5~7분)에 Claude 문구 수정, 재렌더,
+    # 재업로드, 재전송이 이어진다. 그 합을 넉넉히 잡아도 15분 안쪽이라 30분이면 2배 여유다.
+    # 정상 작업을 끊지 않으면서 큐가 막히는 시간은 최대 30분으로 묶인다.
+    timeout-minutes: 30
     permissions:
       contents: write
       id-token: write
@@ -208,15 +220,19 @@ jobs:
       # 알림" 스텝은 수정(claude_edit) 실패만 잡으므로, 승인 처리 스텝 자체의 실패는 이
       # 조건 없는 if: failure() 로 잡는다. daily_30y_news.yml의 "Notify on failure"
       # 스텝과 같은 방식이다 - 본보기로 삼을 것.
+      #
+      # `|| cancelled()`가 필요한 이유: 위 timeout-minutes로 잡이 잘리면 conclusion이
+      # failure가 아니라 **cancelled**라서 조건 없는 if: failure()로도 안 울린다.
+      # daily_30y_news.yml이 같은 이유로 `failure() || cancelled()`를 쓴다.
       - name: 승인 처리 실패 알림 (조건 없음)
-        if: failure()
+        if: failure() || cancelled()
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           TEXT=$(printf '%s\n%s\n%s' \
-            "🚨 승인/수정 처리 중 오류가 발생했습니다. 버튼이나 수정 지시가 정상 처리되지 않았을 수 있습니다." \
+            "🚨 승인/수정 처리가 오류 또는 시간 초과(30분)로 중단됐습니다. 버튼이나 수정 지시가 정상 처리되지 않았을 수 있습니다." \
             "⚠️ 다시 누르기 전에 인스타그램에 실제로 게시됐는지 먼저 확인해주세요 - 이미 게시됐는데 알림만 못 갔을 수 있습니다." \
             "로그: ${RUN_URL}")
           curl -sS --retry 4 --retry-delay 5 --retry-all-errors \

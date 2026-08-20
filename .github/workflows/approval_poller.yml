@@ -111,6 +111,9 @@ jobs:
             # 웹훅 분기(hook)에는 넣지 않는다 - 버튼 클릭과는 무관한 별개의 점검이다.
             # 실패해도 본업(승인 처리)을 죽이지 않도록 run() 내부에서 항상 0을 반환한다.
             python publish_watchdog.py
+            # 승인 대기가 2시간 넘게 안 닫히면 한 번 알린다(dispatch 유실/깜빡함 감지).
+            # hook 분기에는 넣지 않는다 - 버튼 반응을 기다리는 경로라 느려지면 안 된다.
+            python approval_bot.py stale
           fi
           if ls pending/*.json >/dev/null 2>&1 && \
              grep -l '"status": "revision_requested"' pending/*.json >/dev/null 2>&1; then

@@ -205,8 +205,10 @@ jobs:
           # 매 실행마다 우리 토큰으로 되돌려놓고 push한다.
           git config --unset-all http.https://github.com/.extraheader || true
           git remote set-url origin "https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/postcoitum/30y.git"
-          git add pending/ || true
-          git diff --staged --quiet || git commit -m "pending: 승인 처리 결과 반영"
+          # 카드 대기열뿐 아니라 MEMORY_90S 후보 승인/거절도 이 private 레포에
+          # 누적해야 다음 일회용 러너가 같은 pool/거절 이력을 읽는다.
+          git add pending/ data/nostalgia_pool/pool.json data/nostalgia_pool/candidates.json data/nostalgia_pool/feedback_history.json || true
+          git diff --staged --quiet || git commit -m "pending: 승인 처리 결과 + MEMORY_90S 후보 반영"
           if ! git push; then
             echo "::error::push 실패 - 승인/수정 처리 결과가 GitHub에 반영되지 않았습니다"
             curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \

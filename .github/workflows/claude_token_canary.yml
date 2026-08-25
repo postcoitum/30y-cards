@@ -11,37 +11,45 @@
 # 왜 여기(공개 레포)인가:
 #   점검 대상 시크릿이 여기 있고(수정 스텝이 이 레포에서 돈다), 공개 레포 러너는 무료다.
 #
-# 왜 주 1회인가:
-#   승인 지킴이(20분마다)에 붙이면 하루 40번 Claude를 깨우게 된다. 만료를 며칠 안에만
-#   알면 충분하다 - 수정 기능은 매일 쓰는 기능이 아니다.
+# 왜 매일 1회인가:
+#   승인 지킴이(20분마다)에 붙이면 하루 40번 Claude를 깨우게 된다. 대신 카드 검토 전
+#   하루 한 번만 같은 인증 경로를 실제로 확인해 수정 요청이 들어오기 전에 문제를 알린다.
 name: Claude 토큰 만료 감시
 
 on:
   schedule:
-    # 월 02:00 UTC = 11:00 KST. 발행(07:15 UTC)과 겹치지 않는 한산한 시각.
-    - cron: '0 2 * * 1'
+    # 매일 06:00 UTC = 15:00 KST. 카드 검토 전에 수정 엔진 인증을 확인한다.
+    - cron: '0 6 * * *'
   workflow_dispatch:
 
 jobs:
   canary:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write
     steps:
       # 토큰이 살아 있는지 보는 것이 전부다. 실제 수정 경로와 같은 액션·같은 시크릿을
       # 쓰는 것이 핵심 - 다른 방법으로 검사하면 "검사는 통과하는데 실전은 죽는" 상태가 된다.
       - name: 토큰으로 Claude를 한 번 깨워본다
         id: canary
         continue-on-error: true
-        uses: anthropics/claude-code-action@v1
+        timeout-minutes: 5
+        uses: anthropics/claude-code-action@16b3b310c3d7b5279df73130324d5205aeea8eac
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_args: --max-turns 1
           prompt: 'Reply with exactly: ok'
 
-      - name: 죽었으면 알린다
+      - name: 수정 엔진 사전 점검 실패를 알린다
         if: steps.canary.outcome != 'success'
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           curl -sS --retry 3 --retry-all-errors \
             -X POST "https://api.telegram.org/bot${{ secrets.TELEGRAM_BOT_TOKEN }}/sendMessage" \
             -d "chat_id=${{ secrets.TELEGRAM_CHAT_ID }}" \
-            -d "text=🔑 Claude 토큰(CLAUDE_CODE_OAUTH_TOKEN)이 만료된 것 같습니다. 지금은 발행·보류·알림에 지장이 없지만, 이 상태로는 ✏️ 수정 지시가 실패합니다. 복구: claude setup-token → gh secret set CLAUDE_CODE_OAUTH_TOKEN -R postcoitum/30y-cards" \
+            -d "text=⚠️ 수정 엔진 사전 점검에 실패했습니다. 원인은 Claude 인증 또는 실행 환경일 수 있습니다. 지금은 발행·보류·알림에 지장이 없지만, 이 상태로는 ✏️ 수정 지시가 실패할 수 있습니다. 로그: ${RUN_URL}" \
             || true
+          exit 1

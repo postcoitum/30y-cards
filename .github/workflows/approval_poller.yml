@@ -50,13 +50,12 @@ jobs:
     # 30분인 이유: 평상시 경로(체크아웃 2회 + `pip install requests` + 승인 처리 + 커밋)는
     # 3~5분이고, 게시까지 가도 컨테이너 대기가 캐러셀 60초·릴스 180초로 상한이 있다.
     # 가장 무거운 건 수정 요청 경로다 - `requirements.txt` 전체 설치와
-    # `playwright install chromium --with-deps`(합쳐 5~7분)에 Claude 문구 수정, 재렌더,
+    # `playwright install chromium --with-deps`(합쳐 5~7분)에 Gemini 문구 수정, 재렌더,
     # 재업로드, 재전송이 이어진다. 그 합을 넉넉히 잡아도 15분 안쪽이라 30분이면 2배 여유다.
     # 정상 작업을 끊지 않으면서 큐가 막히는 시간은 최대 30분으로 묶인다.
     timeout-minutes: 30
     permissions:
       contents: write
-      id-token: write
     steps:
       - name: 파이프라인 코드 체크아웃 (private 30y)
         uses: actions/checkout@v4
@@ -127,37 +126,6 @@ jobs:
 
       # ---- 여기부터는 수정 요청이 들어왔을 때만 돈다 ----
 
-      - name: Claude가 문구를 고친다
-        id: claude_edit
-        if: steps.poll.outputs.needs_text_revision == 'true'
-        continue-on-error: true
-        timeout-minutes: 5
-        uses: anthropics/claude-code-action@16b3b310c3d7b5279df73130324d5205aeea8eac
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          claude_args: --max-turns 3
-          prompt: |
-            pending/ 디렉터리에서 "status": "revision_requested" 인 JSON 파일을 찾아라.
-            그 파일의 revision_instruction 이 사람이 텔레그램으로 보낸 수정 지시다.
-
-            지시대로 같은 파일 안 news_json 의 슬라이드 텍스트를 고쳐라.
-
-            지켜야 할 것:
-            - 고칠 수 있는 것은 텍스트뿐이다: card_slides[].headline, sub_headline,
-              body_text, 그리고 instagram_caption 의 hook_line / main_caption /
-              call_to_action / hashtags.
-            - bg_image_url, image_source, short_credit, image_verdict, slide_number,
-              type 은 **절대 건드리지 마라.** 사진은 이미 검증을 통과한 것들이다.
-            - body_text 는 슬라이드당 합계 100자 이하, 완결된 문장 1~2개. 넘치면 문장을
-              줄이지 말고 다른 슬라이드로 나눠 담아라.
-            - body_text 에 \n 을 넣지 마라. 줄바꿈은 renderer.py 가 정한다.
-            - 날짜는 hook_line 에만 넣는다. main_caption 은 "30년 전 오늘,"로 연다.
-            - 해시태그는 캡션 본문에 넣지 마라.
-            - 사실관계를 새로 지어내지 마라. 지시가 사실 변경을 요구하면 고치지 말고
-              revision_instruction 자리에 왜 못 고쳤는지 적어라.
-
-            JSON 파일만 수정하고 다른 파일은 건드리지 마라. 커밋하지 마라.
-
       # 발행 워크플로(daily_30y_news.yml)에 ffmpeg 보장 스텝이 따로 있다는 것은
       # 러너에 ffmpeg이 있다고 믿을 수 없다는 뜻이다. 수정 경로는 cmd_resend()에서
       # 릴스를 새 커버로 재생성하는데, 그 실패는 try/except에 삼켜져 reel_video_url이
@@ -166,7 +134,7 @@ jobs:
       # 같은 보장을 여기에도 둔다.
       - name: 수정본 렌더링 준비
         id: prepare_revision
-        if: steps.poll.outputs.needs_image_revision == 'true' || (steps.poll.outputs.needs_text_revision == 'true' && steps.claude_edit.outcome == 'success')
+        if: steps.poll.outputs.needs_revision == 'true'
         continue-on-error: true
         timeout-minutes: 10
         run: |
@@ -177,6 +145,20 @@ jobs:
             sudo apt-get update && sudo apt-get install -y ffmpeg
           fi
           ffmpeg -version | head -1
+
+      - name: Gemini가 문구를 고친다
+        id: text_edit
+        if: steps.poll.outputs.needs_text_revision == 'true' && steps.prepare_revision.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 13
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          CARDS_REPO_TOKEN: ${{ secrets.CARDS_REPO_TOKEN }}
+          KOREAN_LINEBREAK_ENGINE: ${{ vars.KOREAN_LINEBREAK_ENGINE || 'v1' }}
+        run: |
+          python approval_bot.py edit_text
 
       - name: 검증 사진 보완
         id: repair_images
@@ -192,24 +174,9 @@ jobs:
         run: |
           python approval_bot.py repair_images
 
-      - name: 수정본 재전송
-        id: resend
-        if: steps.poll.outputs.needs_text_revision == 'true' && steps.prepare_revision.outcome == 'success' && steps.claude_edit.outcome == 'success'
-        continue-on-error: true
-        timeout-minutes: 8
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          CARDS_REPO_TOKEN: ${{ secrets.CARDS_REPO_TOKEN }}
-          # 이 스텝이 renderer.py로 수정본을 다시 렌더링한다. .env는 이 러너에 없으므로
-          # 발행 워크플로와 같은 방식으로 레포 변수를 읽는다 (기본값 v1 유지).
-          KOREAN_LINEBREAK_ENGINE: ${{ vars.KOREAN_LINEBREAK_ENGINE || 'v1' }}
-        run: |
-          python approval_bot.py resend
-
       - name: 수정 실패 알림 및 상태 전환
         id: revision_failed
-        if: always() && steps.poll.outputs.needs_revision == 'true' && (steps.claude_edit.outcome == 'failure' || steps.prepare_revision.outcome == 'failure' || steps.repair_images.outcome == 'failure' || steps.resend.outcome == 'failure')
+        if: always() && steps.poll.outputs.needs_revision == 'true' && (steps.text_edit.outcome == 'failure' || steps.prepare_revision.outcome == 'failure' || steps.repair_images.outcome == 'failure')
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -228,10 +195,9 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # claude-code-action이 여기 오는 동안 git 인증정보(remote/extraheader)를 자기
-          # GitHub App 설치 토큰으로 덮어쓰고 종료 시 revoke한다. 그대로 두면 push가
-          # "Invalid username or token"으로 조용히 실패한다(2026-08-08 사고, 재현율 100%).
-          # 매 실행마다 우리 토큰으로 되돌려놓고 push한다.
+          # 과거 외부 수정 action이 git 인증정보를 덮어쓴 사고 뒤부터 매 실행마다
+          # 우리 토큰으로 되돌린다. 지금은 Gemini를 파이썬에서 직접 호출하지만,
+          # 이 복구는 기존 실행/checkout 변화에도 안전한 방어선이라 유지한다.
           git config --unset-all http.https://github.com/.extraheader || true
           git remote set-url origin "https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/postcoitum/30y.git"
           # 카드 대기열뿐 아니라 MEMORY_90S 후보 승인/거절도 이 private 레포에
@@ -251,7 +217,7 @@ jobs:
       # 텔레그램에는 answer_callback의 "접수했습니다" 토스트만 가고 그 뒤로 아무 알림도
       # 안 갔다 - 파이썬이 죽어서 approval_bot.py 안의 알림(위 apply_decisions 수정 참고)
       # 조차 못 뜬 경우다. 사용자는 게시 여부를 몰라 버튼을 11번 더 눌렀다. 위 "수정 실패
-      # 알림" 스텝은 수정(claude_edit) 실패만 잡으므로, 승인 처리 스텝 자체의 실패는 이
+      # 알림" 스텝은 수정(text_edit) 실패만 잡으므로, 승인 처리 스텝 자체의 실패는 이
       # 조건 없는 if: failure() 로 잡는다. daily_30y_news.yml의 "Notify on failure"
       # 스텝과 같은 방식이다 - 본보기로 삼을 것.
       #

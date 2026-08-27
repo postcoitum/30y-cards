@@ -117,9 +117,12 @@ jobs:
           REVISION_FILE=$(grep -l '"status": "revision_requested"' pending/*.json 2>/dev/null | head -1 || true)
           if [ -n "$REVISION_FILE" ]; then
             echo "needs_revision=true" >> "$GITHUB_OUTPUT"
-            if grep -q '"revision_type": "image"' "$REVISION_FILE"; then
+            # mixed는 사진 경로 한 프로세스에서 문구까지 합쳐 고친 뒤 한 번만 재전송한다.
+            if grep -q '"revision_type": "image"' "$REVISION_FILE" || \
+               grep -q '"revision_type": "mixed"' "$REVISION_FILE"; then
               echo "needs_image_revision=true" >> "$GITHUB_OUTPUT"
-            else
+            fi
+            if grep -q '"revision_type": "text"' "$REVISION_FILE"; then
               echo "needs_text_revision=true" >> "$GITHUB_OUTPUT"
             fi
           fi

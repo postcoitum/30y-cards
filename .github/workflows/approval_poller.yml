@@ -1,10 +1,8 @@
 # 이 파일이 사는 곳: **postcoitum/30y-cards** 레포의 .github/workflows/approval_poller.yml
 #
 # 왜 여기(공개 레포)인가:
-#   remind(인스타에 실제로 게시됐는지 Buffer에 물어보는 일)는 하루 종일 20분마다
-#   깨어나야 한다. private 레포(30y)에서 돌리면 그 시간이 전부 Actions 분으로 과금돼
-#   무료 2,000분/월을 넘긴다. **공개 레포는 표준 러너가 무제한 무료**다. 코드는
-#   private 30y에 그대로 두고 PAT로 체크아웃해서 쓴다.
+#   자동 게시·구형 승인 처리가 여기서 돈다. private 레포(30y)에서 돌리면 Actions 분이
+#   과금될 수 있어 공개 레포에 두고 코드는 PAT로 체크아웃한다. **공개 레포는 표준 러너가 무료**다.
 #
 # 승인은 이제 cron이 아니라 **웹훅**으로 온다:
 #   버튼 누름 → 텔레그램 → Cloudflare Worker → repository_dispatch → 이 워크플로
@@ -20,15 +18,15 @@
 #   트리거 구멍은 막아주지 않는다.)
 #   repository_dispatch는 토큰 없이는 못 쏘고, 그 토큰은 Cloudflare Worker 안에만 있다.
 
-name: 카드 승인 지킴이
+name: 카드 처리 지킴이
 
 on:
   # 승인/수정 지시가 들어오는 길. Cloudflare Worker만 이걸 쏠 수 있다.
   repository_dispatch:
-    types: [telegram-update]
+    types: [telegram-update, auto-publish]
   schedule:
     # 20분마다, 00:00~14:59 UTC = 09:00~23:59 KST. 자는 시간엔 깨우지 않는다.
-    # 이제 이 주기가 하는 일은 remind(게시 감지)뿐이다 - 승인은 위 웹훅이 받는다.
+    # 구형 대기 승인 건과 텔레그램 폴백을 유지한다. 자동 게시 자체는 이 cron이 처리하지 않는다.
     - cron: '*/20 0-14 * * *'
   workflow_dispatch:
 
@@ -81,7 +79,8 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           INSTAGRAM_ACCOUNT_ID: ${{ secrets.INSTAGRAM_ACCOUNT_ID }}
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
-          BUFFER_ACCESS_TOKEN: ${{ secrets.BUFFER_ACCESS_TOKEN }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
           # 웹훅 모드 스위치. true면 poll(getUpdates)을 건너뛴다 - 웹훅을 건 봇에서는
           # getUpdates가 409로 막히기 때문이다. 웹훅이 고장나 되돌릴 때는
           # `python telegram_inbox.py --delete-webhook` 후 이 변수를 false로.
@@ -90,31 +89,31 @@ jobs:
           # 셸 명령이 아니라 **환경변수**로 넘기는 이유: 사람이 쓴 자유 문장(수정 지시)이
           # 그대로 들어와 셸 이스케이프 사고가 나기 쉽다.
           TELEGRAM_UPDATE_JSON: ${{ toJSON(github.event.client_payload.update) }}
-          # 연습 스위치. 레포 변수(Settings > Variables)에 true를 넣어두면 ✅를 눌러도
-          # 예약하지 않고 Buffer 초안으로만 저장한다 - 인스타에 올라가지 않는다.
-          # 변수가 없으면 빈 문자열이라 config가 false로 읽는다(= 실제 예약).
-          BUFFER_SAVE_TO_DRAFT: ${{ vars.BUFFER_SAVE_TO_DRAFT }}
-          # 발행 예약 유실 감시(publish_watchdog.py)가 대리 발행을 요청할 때 쓰는 토큰.
-          # 체크아웃에 쓰는 것과 같은 시크릿을 재사용한다 - 별도 등록 불필요.
-          GH_DISPATCH_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          AUTO_PUBLISH_DATE: ${{ github.event.client_payload.publish_date }}
         run: |
           if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            # 웹훅으로 승인/수정 지시가 왔다. 이 경로에서는 remind를 돌리지 않는다 -
-            # Buffer 상태 조회는 시간이 걸리는데 사람은 버튼의 반응을 기다리고 있다.
-            python approval_bot.py hook
+            if [ "${{ github.event.action }}" = "auto-publish" ]; then
+              # auto_publisher.py는 auto_publish=true, status=ready인 새 항목만 처리한다.
+              # 날짜가 비어 있으면 오늘(KST)만 선택하고 과거 승인 대기 항목은 보지 않는다.
+              if [ -n "$AUTO_PUBLISH_DATE" ]; then
+                python auto_publisher.py --date "$AUTO_PUBLISH_DATE"
+              else
+                python auto_publisher.py
+              fi
+            else
+              python approval_bot.py hook
+            fi
           else
-            # 주기 실행. 게시 감지가 본업이고, poll은 웹훅을 떼고 롤백했을 때만 일한다.
+            # 주기 실행. poll은 웹훅을 떼고 롤백했을 때만 필요하다.
             python approval_bot.py poll
-            python approval_bot.py remind
-            # 발행 예약이 아예 유실됐는지(8/4 사고) 확인하고 필요하면 대신 깨운다.
-            # 웹훅 분기(hook)에는 넣지 않는다 - 버튼 클릭과는 무관한 별개의 점검이다.
-            # 실패해도 본업(승인 처리)을 죽이지 않도록 run() 내부에서 항상 0을 반환한다.
-            python publish_watchdog.py
             # 승인 대기가 2시간 넘게 안 닫히면 한 번 알린다(dispatch 유실/깜빡함 감지).
             # hook 분기에는 넣지 않는다 - 버튼 반응을 기다리는 경로라 느려지면 안 된다.
             python approval_bot.py stale
           fi
-          REVISION_FILE=$(grep -l '"status": "revision_requested"' pending/*.json 2>/dev/null | head -1 || true)
+          REVISION_FILE=
+          if [ "${{ github.event.action }}" != "auto-publish" ]; then
+            REVISION_FILE=$(grep -l '"status": "revision_requested"' pending/*.json 2>/dev/null | head -1 || true)
+          fi
           if [ -n "$REVISION_FILE" ]; then
             echo "needs_revision=true" >> "$GITHUB_OUTPUT"
             # mixed는 사진 경로 한 프로세스에서 문구까지 합쳐 고친 뒤 한 번만 재전송한다.
@@ -205,7 +204,7 @@ jobs:
           git remote set-url origin "https://x-access-token:${PRIVATE_REPO_TOKEN}@github.com/postcoitum/30y.git"
           # 카드 대기열뿐 아니라 MEMORY_90S 후보 승인/거절도 이 private 레포에
           # 누적해야 다음 일회용 러너가 같은 pool/거절 이력을 읽는다.
-          git add pending/ data/nostalgia_pool/*.json
+          git add pending/ data/nostalgia_pool/*.json PUBLISHED_HISTORY.md
           git diff --staged --quiet || git commit -m "pending: 승인 처리 결과 + MEMORY_90S 후보 반영"
           if ! git push; then
             echo "::error::push 실패 - 승인/수정 처리 결과가 GitHub에 반영되지 않았습니다"

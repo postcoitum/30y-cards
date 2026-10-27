@@ -1,0 +1,41 @@
+name: Cloudflare preparation monitor
+on:
+  repository_dispatch:
+    types: [prepare-monitor]
+permissions:
+  contents: read
+concurrency:
+  group: preparation-monitor
+  cancel-in-progress: false
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: postcoitum/30y
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests python-dotenv
+      - name: Verify state and request preparation if missing
+        env:
+          PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          MONITOR_KIND: ${{ github.event.client_payload.kind }}
+          MONITOR_SCHEDULED_AT: ${{ github.event.client_payload.scheduled_at }}
+        run: python preparation_monitor.py
+      - name: Notify when monitor cannot safely recover
+        if: failure() || cancelled()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TEXT=$(printf '%s\n%s' '🚨 준비 감시 또는 복구 요청이 실패했습니다. 준비 상태와 토큰 권한을 확인해 주세요.' "$RUN_URL")
+          curl -fsS --retry 3 --retry-delay 5 --retry-all-errors \
+            -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${TEXT}" | jq -e '.ok == true' >/dev/null

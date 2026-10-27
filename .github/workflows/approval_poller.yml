@@ -26,8 +26,10 @@ on:
     types: [telegram-update, auto-publish]
   schedule:
     # 20분마다, 00:00~14:59 UTC = 09:00~23:59 KST. 자는 시간엔 깨우지 않는다.
-    # 구형 대기 승인 건과 텔레그램 폴백을 유지한다. 자동 게시 자체는 이 cron이 처리하지 않는다.
+    # 구형 승인과 텔레그램 폴백을 유지하고, 20시 이후에는 자동 게시 누락을 복구한다.
     - cron: '*/20 0-14 * * *'
+    # 하루에 한 번 최종 확인. 재시도가 끝났는데 게시되지 않은 경우만 알린다.
+    - cron: '30 14 * * *'
   workflow_dispatch:
 
 # 앞선 실행이 아직 돌고 있으면 끝날 때까지 기다린다. 같은 승인을 두 번 처리해
@@ -95,6 +97,14 @@ jobs:
             if [ "${{ github.event.action }}" = "auto-publish" ]; then
               # auto_publisher.py는 auto_publish=true, status=ready인 새 항목만 처리한다.
               # 날짜가 비어 있으면 오늘(KST)만 선택하고 과거 승인 대기 항목은 보지 않는다.
+              # 구 Worker의 07시 예약이 남아 있어도 20시 전 게시 금지.
+              # 당시 날짜와 대상 날짜가 다르면 지연된 신호도 폐기한다.
+              TODAY_KST=$(TZ=Asia/Seoul date +%F)
+              HOUR_KST=$(TZ=Asia/Seoul date +%H)
+              if [ "$HOUR_KST" -lt 20 ] || { [ -n "$AUTO_PUBLISH_DATE" ] && [ "$AUTO_PUBLISH_DATE" != "$TODAY_KST" ]; }; then
+                echo "게시 허용 시간 또는 날짜가 아닙니다: ${AUTO_PUBLISH_DATE:-$TODAY_KST}"
+                exit 0
+              fi
               if [ -n "$AUTO_PUBLISH_DATE" ]; then
                 python auto_publisher.py --date "$AUTO_PUBLISH_DATE"
               else
@@ -109,6 +119,12 @@ jobs:
             # 승인 대기가 2시간 넘게 안 닫히면 한 번 알린다(dispatch 유실/깜빡함 감지).
             # hook 분기에는 넣지 않는다 - 버튼 반응을 기다리는 경로라 느려지면 안 된다.
             python approval_bot.py stale
+            # 정시 dispatch가 유실되거나 일시 장애가 생겨도 당일 20시 이후
+            # 저장된 자동 게시 항목만 재시도한다. 지킴이 concurrency와 게시자
+            # 내부의 날짜·Meta 중복 확인으로 다른 실행과 충돌하지 않는다.
+            if [ "$(TZ=Asia/Seoul date +%H)" -ge 20 ]; then
+              python auto_publisher.py --date "$(TZ=Asia/Seoul date +%F)" || echo "::warning::자동 게시 미완료: 다음 감시에서 재확인합니다"
+            fi
           fi
           REVISION_FILE=
           if [ "${{ github.event.action }}" != "auto-publish" ]; then
@@ -246,3 +262,30 @@ jobs:
       - name: 처리된 수정 실패를 실행 실패로 남긴다
         if: always() && steps.revision_failed.outcome == 'success'
         run: exit 1
+
+      - name: 당일 발행 최종 확인 및 알림
+        if: github.event_name == 'schedule' && github.event.schedule == '30 14 * * *'
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # 예약이 자정 이후에 도착하면 새 날짜의 항목을 확인하지 않는다.
+          if [ "$(TZ=Asia/Seoul date +%H)" != 23 ]; then
+            echo "최종 확인이 당일 23시 밖에 도착해 건너뜁니다"
+            exit 0
+          fi
+          TODAY_KST=$(TZ=Asia/Seoul date +%F)
+          export TODAY_KST
+          RESULT=$(python -c 'import json,os,pending_store; d=os.environ["TODAY_KST"]; p=pending_store.load(d); a=os.path.join(pending_store.ARCHIVE_DIR,d+".json"); p=p or (json.load(open(a,encoding="utf-8")) if os.path.exists(a) else None); print("complete" if p and p.get("status")=="published" and p.get("media_ids",{}).get("reel") and p.get("media_ids",{}).get("carousel") else "manual" if p and not p.get("auto_publish") else (p or {}).get("status","missing"))')
+          if [ "$RESULT" = complete ] || [ "$RESULT" = manual ]; then
+            echo "최종 상태: $RESULT"
+            exit 0
+          fi
+          echo "::error::$TODAY_KST 자동 게시 미완료: $RESULT"
+          TEXT=$(printf '%s\n%s\n%s' "🚨 ${TODAY_KST} 자동 게시가 완료되지 않았습니다 (상태: ${RESULT})." "게시 여부와 차단 이유를 확인해 주세요." "로그: ${RUN_URL}")
+          curl -fsS --retry 4 --retry-delay 5 --retry-all-errors \
+            -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode "chat_id=${TELEGRAM_CHAT_ID}" \
+            --data-urlencode "text=${TEXT}" | jq -e '.ok == true' >/dev/null
+          exit 1
